@@ -21,6 +21,13 @@ import {
   summarizeStatusCounts,
 } from './list-output.js';
 import { consumeOutputFormat } from './output-format.js';
+import {
+  applySearch,
+  formatSearchSummary,
+  type FilteredServer,
+  type SearchConfig,
+  type ServerWithTools,
+} from './search-utils.js';
 import { dimText, extraDimText, supportsSpinner, yellowText } from './terminal.js';
 import { consumeTimeoutFlag, LIST_TIMEOUT_MS, withTimeout } from './timeouts.js';
 import { loadToolMetadata } from './tool-cache.js';
@@ -34,12 +41,15 @@ export function extractListFlags(args: string[]): {
   format: ListOutputFormat;
   verbose: boolean;
   includeSources: boolean;
+  searchConfig: SearchConfig;
 } {
   let schema = false;
   let timeoutMs: number | undefined;
   let requiredOnly = true;
   let verbose = false;
   let includeSources = false;
+  let filter: string | undefined;
+  let search: string | undefined;
   const format = consumeOutputFormat(args, {
     defaultFormat: 'text',
     allowed: ['text', 'json'],
@@ -78,9 +88,26 @@ export function extractListFlags(args: string[]): {
       timeoutMs = consumeTimeoutFlag(args, index, { flagName: '--timeout' });
       continue;
     }
+    if (token === '--filter' || token === '-f') {
+      args.splice(index, 1);
+      filter = args[index];
+      if (filter) {
+        args.splice(index, 1);
+      }
+      continue;
+    }
+    if (token === '--search' || token === '-s') {
+      args.splice(index, 1);
+      search = args[index];
+      if (search) {
+        args.splice(index, 1);
+      }
+      continue;
+    }
     index += 1;
   }
-  return { schema, timeoutMs, requiredOnly, ephemeral, format, verbose, includeSources };
+  const searchConfig: SearchConfig = { filter, search };
+  return { schema, timeoutMs, requiredOnly, ephemeral, format, verbose, includeSources, searchConfig };
 }
 
 type ListOutputFormat = 'text' | 'json';
@@ -108,6 +135,7 @@ export async function handleList(
 
   if (!target) {
     const previousStdioLogMode = setStdioLogMode('silent');
+    const hasSearchFilter = Boolean(flags.searchConfig.filter || flags.searchConfig.search);
     try {
       const servers = runtime.getDefinitions();
       const perServerTimeoutMs = flags.timeoutMs ?? LIST_TIMEOUT_MS;
@@ -128,20 +156,25 @@ export async function handleList(
       }
 
       if (flags.format === 'text') {
+        const searchNote = hasSearchFilter ? ' (filtering enabled)' : '';
         console.log(
-          `mcporter ${MCPORTER_VERSION} — Listing ${servers.length} server(s) (per-server timeout: ${perServerTimeoutSeconds}s)`
+          `mcporter ${MCPORTER_VERSION} — Listing ${servers.length} server(s) (per-server timeout: ${perServerTimeoutSeconds}s)${searchNote}`
         );
       }
       const spinner =
         flags.format === 'text' && supportsSpinner
           ? ora(`Discovering ${servers.length} server(s)…`).start()
           : undefined;
-      const renderedResults =
-        flags.format === 'text'
-          ? (Array.from({ length: servers.length }, () => undefined) as Array<
-              ReturnType<typeof renderServerListRow> | undefined
-            >)
-          : undefined;
+
+      // When filtering, we need to collect all results before displaying
+      // When not filtering, we can stream results as they arrive
+      const shouldStream = !hasSearchFilter && flags.format === 'text';
+
+      const renderedResults = shouldStream
+        ? (Array.from({ length: servers.length }, () => undefined) as Array<
+            ReturnType<typeof renderServerListRow> | undefined
+          >)
+        : undefined;
       const summaryResults: Array<ListSummaryResult | undefined> = Array.from(
         { length: servers.length },
         () => undefined
@@ -172,7 +205,8 @@ export async function handleList(
           }
         })().then((result) => {
           summaryResults[index] = result;
-          if (renderedResults) {
+          // Only stream when not filtering
+          if (renderedResults && shouldStream) {
             const rendered = renderServerListRow(result, perServerTimeoutMs, { verbose: flags.verbose });
             renderedResults[index] = rendered;
             completedCount += 1;
@@ -187,6 +221,9 @@ export async function handleList(
             } else {
               console.log(rendered.line);
             }
+          } else if (spinner) {
+            completedCount += 1;
+            spinner.text = `Discovering servers… ${completedCount}/${servers.length}`;
           }
           return result;
         })
@@ -194,26 +231,88 @@ export async function handleList(
 
       await Promise.all(tasks);
 
-      if (flags.format === 'json') {
-        const jsonEntries = summaryResults.map((entry, index) => {
-          const serverDefinition = servers[index] ?? entry?.server ?? servers[0];
-          if (!serverDefinition) {
-            throw new Error('Unable to resolve server definition for JSON output.');
-          }
-          const normalizedEntry = entry ?? createUnknownResult(serverDefinition);
-          return buildJsonListEntry(normalizedEntry, perServerTimeoutSeconds, {
-            includeSchemas: Boolean(flags.schema),
-            includeSources: Boolean(flags.verbose || flags.includeSources),
-          });
-        });
-        const counts = summarizeStatusCounts(jsonEntries);
-        console.log(JSON.stringify({ mode: 'list', counts, servers: jsonEntries }, null, 2));
-        return;
-      }
-
       if (spinner) {
         spinner.stop();
       }
+
+      // Apply search/filter if configured
+      let filteredResults: FilteredServer[] | undefined;
+      if (hasSearchFilter) {
+        const serversWithTools: ServerWithTools[] = summaryResults
+          .filter((r): r is ListSummaryResult & { status: 'ok' } => r?.status === 'ok')
+          .map((r) => ({ server: r.server, tools: r.tools }));
+
+        filteredResults = applySearch(serversWithTools, flags.searchConfig);
+
+        if (flags.format === 'text') {
+          const summary = formatSearchSummary(serversWithTools, filteredResults, flags.searchConfig);
+          console.log(dimText(summary));
+          console.log('');
+        }
+      }
+
+      if (flags.format === 'json') {
+        let jsonEntries: ListJsonServerEntry[];
+
+        if (hasSearchFilter && filteredResults) {
+          // Build JSON entries only for filtered results
+          jsonEntries = filteredResults.map((filtered) => {
+            const originalResult = summaryResults.find((r) => r?.server.name === filtered.server.name);
+            if (!originalResult) {
+              throw new Error(`Unable to find result for server ${filtered.server.name}`);
+            }
+            // Create a modified result with only matched tools
+            const modifiedResult: ListSummaryResult =
+              originalResult.status === 'ok'
+                ? { ...originalResult, tools: filtered.matchedTools }
+                : originalResult;
+            return buildJsonListEntry(modifiedResult, perServerTimeoutSeconds, {
+              includeSchemas: Boolean(flags.schema),
+              includeSources: Boolean(flags.verbose || flags.includeSources),
+            });
+          });
+        } else {
+          jsonEntries = summaryResults.map((entry, index) => {
+            const serverDefinition = servers[index] ?? entry?.server ?? servers[0];
+            if (!serverDefinition) {
+              throw new Error('Unable to resolve server definition for JSON output.');
+            }
+            const normalizedEntry = entry ?? createUnknownResult(serverDefinition);
+            return buildJsonListEntry(normalizedEntry, perServerTimeoutSeconds, {
+              includeSchemas: Boolean(flags.schema),
+              includeSources: Boolean(flags.verbose || flags.includeSources),
+            });
+          });
+        }
+
+        const counts = summarizeStatusCounts(jsonEntries);
+        const payload: Record<string, unknown> = { mode: 'list', counts, servers: jsonEntries };
+        if (hasSearchFilter) {
+          payload.searchConfig = flags.searchConfig;
+        }
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+
+      // Text output with filtering
+      if (hasSearchFilter && filteredResults) {
+        for (const filtered of filteredResults) {
+          const toolCount = filtered.matchedTools.length;
+          const totalTools = filtered.tools.length;
+          const serverLine = `${filtered.server.name} (${toolCount}/${totalTools} tools matched)`;
+          console.log(serverLine);
+          for (const tool of filtered.matchedTools) {
+            const toolDesc = tool.description ? ` — ${tool.description}` : '';
+            console.log(`  ${filtered.server.name}.${tool.name}${dimText(toolDesc)}`);
+          }
+        }
+        if (filteredResults.length === 0) {
+          console.log(yellowText('No tools matched the search criteria.'));
+        }
+        return;
+      }
+
+      // Standard text output (no filtering) - results already streamed above
       const errorCounts = createEmptyStatusCounts();
       renderedResults?.forEach((entry) => {
         if (!entry) {
@@ -360,6 +459,10 @@ export function printListHelp(): void {
     '  <name>                 Use a server from config/mcporter.json or editor imports.',
     '  https://host/mcp       List an HTTP server directly; mcporter infers the entry.',
     '',
+    'Search & filter flags:',
+    '  -f, --filter <pattern> Filter tools using glob patterns (e.g., "*github*", "slack.*message*")',
+    '  -s, --search <query>   Fuzzy search tools (e.g., "send slack msg", "github issues")',
+    '',
     'Ad-hoc servers:',
     '  --http-url <url>       Register an HTTP server for this run.',
     '  --allow-http           Permit plain http:// URLs with --http-url.',
@@ -385,6 +488,13 @@ export function printListHelp(): void {
     '  mcporter list linear --schema',
     '  mcporter list https://mcp.example.com/mcp',
     '  mcporter list --http-url https://localhost:3333/mcp --schema',
+    '',
+    'Search examples:',
+    '  mcporter list --filter "*github*"          # Glob: find GitHub-related tools',
+    '  mcporter list -f "slack.*message*"         # Glob: Slack message tools',
+    '  mcporter list --search "create issue"      # Fuzzy: issue creation tools',
+    '  mcporter list -s "send notification"       # Fuzzy: notification tools',
+    '  mcporter list -f "*api*" --json            # Filter + JSON output',
   ];
   console.error(lines.join('\n'));
 }

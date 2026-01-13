@@ -15,6 +15,7 @@ describe('CLI list flag parsing', () => {
       verbose: false,
       ephemeral: undefined,
       format: 'text',
+      searchConfig: { filter: undefined, search: undefined },
     });
     expect(args).toEqual(['server']);
   });
@@ -31,6 +32,7 @@ describe('CLI list flag parsing', () => {
       verbose: false,
       ephemeral: undefined,
       format: 'text',
+      searchConfig: { filter: undefined, search: undefined },
     });
     expect(args).toEqual(['server']);
   });
@@ -49,6 +51,46 @@ describe('CLI list flag parsing', () => {
     const flags = extractListFlags(args);
     expect(flags.ephemeral).toEqual({ httpUrl: 'https://mcp.example.com/sse' });
     expect(args).toEqual(['list']);
+  });
+
+  it('parses --filter flag for glob pattern matching', async () => {
+    const { extractListFlags } = await cliModulePromise;
+    const args = ['--filter', '*github*', 'server'];
+    const flags = extractListFlags(args);
+    expect(flags.searchConfig).toEqual({ filter: '*github*', search: undefined });
+    expect(args).toEqual(['server']);
+  });
+
+  it('parses -f as shorthand for --filter', async () => {
+    const { extractListFlags } = await cliModulePromise;
+    const args = ['-f', 'slack.*message*', 'server'];
+    const flags = extractListFlags(args);
+    expect(flags.searchConfig).toEqual({ filter: 'slack.*message*', search: undefined });
+    expect(args).toEqual(['server']);
+  });
+
+  it('parses --search flag for fuzzy search', async () => {
+    const { extractListFlags } = await cliModulePromise;
+    const args = ['--search', 'send message', 'server'];
+    const flags = extractListFlags(args);
+    expect(flags.searchConfig).toEqual({ filter: undefined, search: 'send message' });
+    expect(args).toEqual(['server']);
+  });
+
+  it('parses -s as shorthand for --search', async () => {
+    const { extractListFlags } = await cliModulePromise;
+    const args = ['-s', 'create issue', 'server'];
+    const flags = extractListFlags(args);
+    expect(flags.searchConfig).toEqual({ filter: undefined, search: 'create issue' });
+    expect(args).toEqual(['server']);
+  });
+
+  it('parses both --filter and --search together', async () => {
+    const { extractListFlags } = await cliModulePromise;
+    const args = ['--filter', '*api*', '--search', 'create', 'server'];
+    const flags = extractListFlags(args);
+    expect(flags.searchConfig).toEqual({ filter: '*api*', search: 'create' });
+    expect(args).toEqual(['server']);
   });
 
   it('honors --timeout when listing a single server', async () => {

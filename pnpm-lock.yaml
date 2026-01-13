@@ -26,9 +26,15 @@ importers:
       es-toolkit:
         specifier: ^1.43.0
         version: 1.43.0
+      fuse.js:
+        specifier: ^7.1.0
+        version: 7.1.0
       jsonc-parser:
         specifier: ^3.3.1
         version: 3.3.1
+      minimatch:
+        specifier: ^10.1.1
+        version: 10.1.1
       ora:
         specifier: ^9.0.0
         version: 9.0.0
@@ -966,6 +972,10 @@ packages:
 
   function-bind@1.1.2:
     resolution: {integrity: sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==}
+
+  fuse.js@7.1.0:
+    resolution: {integrity: sha512-trLf4SzuuUxfusZADLINj+dE8clK1frKdmqiJNb1Es75fmI5oY6X2mxLVUciLLjxqw/xr72Dhy+lER6dGd02FQ==}
+    engines: {node: '>=10'}
 
   get-east-asian-width@1.4.0:
     resolution: {integrity: sha512-QZjmEOC+IT1uk6Rx0sX22V6uHWVwbdbxf1faPqJ1QhLdGgsRGCZoyaQBm/piRdJy/D2um6hM1UP7ZEeQ4EkP+Q==}
@@ -2205,6 +2215,8 @@ snapshots:
     optional: true
 
   function-bind@1.1.2: {}
+
+  fuse.js@7.1.0: {}
 
   get-east-asian-width@1.4.0: {}
 
