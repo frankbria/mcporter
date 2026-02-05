@@ -1,10 +1,16 @@
 import { analyzeConnectionError, type ConnectionIssue } from './error-classifier.js';
 
+export interface ImageContent {
+  data: string;
+  mimeType: string;
+}
+
 export interface CallResult<T = unknown> {
   raw: T;
   text(joiner?: string): string | null;
   markdown(joiner?: string): string | null;
   json<J = unknown>(): J | null;
+  images(): ImageContent[] | null;
   content(): unknown[] | null;
   structuredContent(): unknown;
 }
@@ -67,6 +73,24 @@ function asString(value: unknown): string | null {
     return typeof text === 'string' ? text : null;
   }
   return null;
+}
+
+// collectImages extracts all image content blocks.
+function collectImages(content: unknown[]): ImageContent[] | null {
+  const images: ImageContent[] = [];
+  for (const entry of content) {
+    if (entry && typeof entry === 'object' && 'type' in entry) {
+      const typedEntry = entry as Record<string, unknown>;
+      if (typedEntry.type === 'image') {
+        const data = typedEntry.data;
+        const mimeType = typedEntry.mimeType ?? 'image/png';
+        if (typeof data === 'string' && typeof mimeType === 'string') {
+          images.push({ data, mimeType });
+        }
+      }
+    }
+  }
+  return images.length > 0 ? images : null;
 }
 
 // collectText flattens all text/markdown entries into a joined string.
@@ -229,6 +253,13 @@ export function createCallResult<T = unknown>(raw: T): CallResult<T> {
         }
       }
       return null;
+    },
+    images() {
+      const content = extractContentArray(raw);
+      if (!content) {
+        return null;
+      }
+      return collectImages(content);
     },
     content() {
       return extractContentArray(raw);

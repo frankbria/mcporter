@@ -1,6 +1,7 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { inspect } from 'node:util';
-import type { CallResult } from '../result-utils.js';
+import type { CallResult, ImageContent } from '../result-utils.js';
 import { logWarn } from './logger-context.js';
 
 export type OutputFormat = 'auto' | 'text' | 'markdown' | 'json' | 'raw';
@@ -117,6 +118,60 @@ export function tailLogIfRequested(result: unknown, enabled: boolean): void {
     } catch (error) {
       logWarn(`Failed to read log file ${candidate}: ${(error as Error).message}`);
     }
+  }
+}
+
+export function saveCallImagesIfRequested<T>(wrapped: CallResult<T>, outputDir: string | undefined): void {
+  if (!outputDir) {
+    return;
+  }
+  const images = wrapped.images();
+  if (!images || images.length === 0) {
+    return;
+  }
+  const resolvedDir = path.resolve(outputDir);
+  try {
+    fs.mkdirSync(resolvedDir, { recursive: true });
+  } catch (error) {
+    logWarn(`Unable to create image output directory ${resolvedDir}: ${(error as Error).message}`);
+    return;
+  }
+  writeImages(images, resolvedDir);
+}
+
+function writeImages(images: ImageContent[], outputDir: string): void {
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    const ext = extensionFromMimeType(img.mimeType);
+    const outputPath = resolveImageOutputPath(outputDir, i + 1, ext);
+    try {
+      const buffer = Buffer.from(img.data, 'base64');
+      fs.writeFileSync(outputPath, buffer);
+      console.error(`[mcporter] Saved image: ${outputPath} (${buffer.length} bytes, ${img.mimeType})`);
+    } catch (writeError) {
+      logWarn(`Failed to save image ${i + 1} (${img.mimeType}): ${(writeError as Error).message}`);
+    }
+  }
+}
+
+function extensionFromMimeType(mimeType: string): string {
+  const subtype = mimeType.split('/')[1]?.split(';')[0]?.trim().toLowerCase();
+  if (subtype && /^[a-z0-9.+-]+$/.test(subtype)) {
+    return subtype;
+  }
+  return 'png';
+}
+
+function resolveImageOutputPath(outputDir: string, imageIndex: number, extension: string): string {
+  const baseName = `image-${imageIndex}`;
+  let attempt = 0;
+  while (true) {
+    const suffix = attempt === 0 ? '' : `-${attempt}`;
+    const candidate = path.join(outputDir, `${baseName}${suffix}.${extension}`);
+    if (!fs.existsSync(candidate)) {
+      return candidate;
+    }
+    attempt += 1;
   }
 }
 
